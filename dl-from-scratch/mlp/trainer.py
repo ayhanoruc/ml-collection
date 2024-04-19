@@ -243,8 +243,9 @@ def plot_history(train_losses, val_losses, train_metrics, val_metrics, eval_ever
 
     plt.suptitle(title)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust the rect so the title fits without overlap
-    plt.show()
-    plt.savefig('../mlp-training-plot.png')
+    plt.savefig('dl-from-scratch/mlp/mlp-training-plot.png')
+    #plt.show()
+    
 
 def train(model, X_train, y_train, optimizer, loss_fn,metric, epochs):
     """
