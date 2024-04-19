@@ -1,31 +1,11 @@
 import numpy as np 
-from typing import Callable, Dict
 
 
-def tanh(x):
-    t = np.tanh(x.value)
-    out = AutoTensor(t, (x,), 'tanh')
-    def backward():
-        out.grad += (1 - t**2) * x.grad
-    out._backward = backward
-    return out
-
-def relu(x):
-    out = AutoTensor(max(0, x.value), (x,), 'relu')
-    def backward():
-        out.grad += (1 if x.value > 0 else 0) * x.grad
-    out._backward = backward
-    return out
 
 class AutoTensor:
     """
     Represents a differentiable tensor in a computational graph that supports automatic differentiation.
     """
-    activations: Dict[str, Callable[[float], 'AutoTensor']] = {
-        'tanh': tanh,
-        'relu': relu
-    }
-
     def __init__(self, value, _children=(), _ops='', label=''):
         """
         Initialize an AutoTensor object.
@@ -89,22 +69,44 @@ class AutoTensor:
 
     def __truediv__(self, other):
         """
-        Perform element-wise division of two tensors.
+        Perform element-wise division of this tensor by another tensor or a scalar.
         """
-        other = other if isinstance(other, AutoTensor) else AutoTensor(other)
+        if not isinstance(other, AutoTensor):
+            other = AutoTensor(other)  # Convert scalar to AutoTensor for uniform handling
         if other.value == 0:
             raise ValueError("Cannot divide by zero")
+
         out = AutoTensor(self.value / other.value, (self, other), '/')
+    
+        def backward():
+            # Apply the chain rule for division
+            self.grad += (1 / other.value) * out.grad
+            other.grad -= (self.value / (other.value ** 2)) * out.grad
+        out._backward = backward
+        
         return out
+
 
     def __rtruediv__(self, other):
         """
-        Support right division for non-AutoTensor objects.
+        Support right division for non-AutoTensor objects. This is other / self.
         """
-        other = other if isinstance(other, AutoTensor) else AutoTensor(other)
+        if not isinstance(other, AutoTensor):
+            other = AutoTensor(other)  # Convert scalar to AutoTensor if necessary
+        
         if self.value == 0:
             raise ValueError("Cannot divide by zero")
-        return AutoTensor(other.value / self.value, (other, self), '/')
+
+        out = AutoTensor(other.value / self.value, (other, self), '/')
+
+        def backward():
+            # Apply the chain rule for division in the reverse order
+            self.grad -= (other.value / (self.value ** 2)) * out.grad
+            other.grad += (1 / self.value) * out.grad
+            
+        out._backward = backward
+
+        return out
 
     def __pow__(self, other):
         """
@@ -140,6 +142,7 @@ class AutoTensor:
         # Ensure that the value is clipped according to the boundaries provided
         self.value = max(min(self.value, max_value), min_value)
         return self
+
 
     def tanh(self):
         """
@@ -183,21 +186,25 @@ class AutoTensor:
         for node in reversed(topo):
             node._backward()
 
+
     @classmethod
-    def get_activation_function(cls, name: str) -> Callable:
+    def get_activation_function(cls, name: str):
         """
-        Retrieves an activation function by name safely from predefined functions.
+        Retrieves an activation function by name, using the internal implementations within AutoTensor class.
 
         Parameters:
             name (str): The name of the activation function to retrieve.
 
         Returns:
-            Callable: The activation function.
+            Callable: The activation function as a method bound to AutoTensor instances.
 
         Raises:
-            ValueError: If the activation function name is not a valid key.
+            AttributeError: If no such function exists in the AutoTensor.
         """
-        if name in cls.activations:
-            return cls.activations[name]
-        else:
-            raise ValueError(f"No activation function named '{name}' available.")
+        # Directly return the method bound to the class, which will be called on an instance
+        try:
+            # Here we access the instance method directly through the class.
+            function = getattr(AutoTensor, name)
+        except AttributeError:
+            raise ValueError(f"No activation function named '{name}' found in AutoTensor.")
+        return function
