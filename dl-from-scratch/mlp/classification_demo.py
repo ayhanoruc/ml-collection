@@ -2,66 +2,74 @@ import numpy as np
 from sklearn.datasets import make_moons
 import matplotlib.pyplot as plt
 from neural_structures import MLP
-from trainer import SGDOptimizer, Loss, data_loader, train, evaluate, accuracy, predict
+from auto_tensor import AutoTensor
+from trainer import SGDOptimizer, Loss, data_loader, train, evaluate, accuracy, predict, mse_loss,\
+                    train_and_validate
+
 from random import random
 
-# Generate synthetic data
-X, y = make_moons(n_samples=300, noise=0.2, random_state=42)
-y = y * 2 - 1  # Convert labels to -1 or 1
+np.random.seed(42)
 
-# Plot the data
-plt.figure(figsize=(8, 5))
-plt.scatter(X[:, 0], X[:, 1], c=y, cmap='bwr', edgecolors='k')
-plt.title("Synthetic 'make_moons' Dataset")
-plt.show()
+# Function to generate a sample learnable dataset
+def generate_normalized_data(num_samples, num_features, num_classes):
+    X = np.random.randn(num_samples, num_features)  # Random features
+    # Normalize the features to have mean 0 and variance 1
+    X = (X - np.mean(X, axis=0)) / np.std(X, axis=0)
 
-
-# Assuming your MLP and other classes are defined as in your reference.
-np.random.seed(1337)
-
-# Data Preparation
-X, y = make_moons(n_samples=100, noise=0.1)
-y = y * 2 - 1  # Convert y to -1 or 1
-dataset = (X, y)
-
-# Model Initialization
-model = MLP(2, [16, 16, 1], ['relu', 'relu', 'tanh'])
-
-
-# Prepare data loader
-batch_size = 32
-train_loader = data_loader(dataset, batch_size=batch_size, shuffle=True)
-
-# Define the optimizer
-optimizer = SGDOptimizer(parameters=model.parameters(), lr=0.01)
-
-# Define a simple loss function for binary classification
-def loss_fn(y_pred, y_true):
-    # Assuming y_pred and y_true are lists of AutoTensor and actual labels respectively
-    # Calculate binary cross-entropy loss
-    bce_loss = Loss.binary_cross_entropy(y_pred, y_true)
+    true_weights = np.random.randn(num_features, num_classes)  # Random weights for our model
+    noise = 0.1 * np.random.randn(num_samples, num_classes)  # Some noise
     
-    # Calculate accuracy as a single float value
-    accuracy = sum((yp.value > 0) == (yt == 1) for yp, yt in zip(y_pred, y_true)) / len(y_true)
-    return bce_loss, accuracy
+    # Generate targets: multiply features with weights and add noise
+    Y = X.dot(true_weights) + noise
+    
+    # Apply a threshold to get binary class labels
+    Y = np.where(Y > 0, 1, -1)
+    
+    return X, Y.squeeze()
 
-# Train the model
-epochs = 400
-train(model, train_loader, optimizer, loss_fn, epochs)
+# Generate a sample dataset with 5 features, 20 samples, and binary class labels
+X_sample, Y_sample = generate_normalized_data(40, 5, 1)
 
-# Define the metric as accuracy
-def metric(predictions, labels):
-    return accuracy(np.round(predictions), labels)
-
-# Evaluate the model
-print("Evaluating the model...")
-eval_loader = data_loader(dataset, batch_size=len(X), shuffle=False)  # Use the entire dataset for evaluation in one go
-eval_accuracy = evaluate(model, eval_loader, metric)
-print(f"Model accuracy: {eval_accuracy * 100:.2f}%")
+X_train, y_train, X_val, y_val  = X_sample.tolist()[:30], Y_sample.tolist()[:30], X_sample.tolist()[30:], Y_sample.tolist()[30:]
 
 
-# make inference
-# Make predictions on new data
-new_data = np.array([[1.5, -0.5], [-1.0, 0.5]])  # Example new data points
-predictions = predict(model, new_data)
-print("Predictions:", predictions)
+
+
+mlp = MLP(5, [8, 8, 1], ['relu', 'relu','tanh'])
+n_iters = 1000
+learning_rate = 0.01
+
+for i in range(n_iters):
+    # forward pass
+    y_preds = [mlp(x) for x in X_train]
+    
+    # compute loss
+    loss = sum((y-y_pred) ** 2 for y_pred, y in zip(y_preds, y_train))/len(y_train)
+    
+   
+    # reset gradients
+    mlp.zero_grad()
+
+    # backward pass
+    loss.backward()
+
+    # update
+    for p in mlp.parameters():
+        p.value += -learning_rate * p.grad
+    
+    if i % 100 == 0:
+        print(f'Iteration: {i}, Loss: {loss.value}')
+
+    # apply early stopping
+    if loss.value < 0.1:
+        print(f'Iteration: {i}, Loss: {loss.value}')
+        break
+
+
+mlp = MLP(5, [8, 8, 1], ['relu', 'relu','tanh'])
+optimizer = SGDOptimizer(mlp.parameters(), lr=0.1)
+epochs=1000
+eval_every = 100
+print("using trainer method")
+train_and_validate(mlp, X_train, y_train, X_val, y_val, optimizer, mse_loss,accuracy,epochs,eval_every)
+#train(mlp, X_train, y_train, optimizer, mse_loss,accuracy,epochs)
