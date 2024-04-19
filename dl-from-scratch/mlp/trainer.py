@@ -1,6 +1,7 @@
 import numpy as np
 from auto_tensor import AutoTensor
-
+import matplotlib.pyplot as plt
+from typing import Callable
 class Loss:
     """
     A class containing various loss functions and their derivatives for training neural networks.
@@ -71,34 +72,29 @@ class Loss:
 
 class SGDOptimizer:
     """
-    A class that implements basic stochastic gradient descent (SGD) optimization with enhancements for adaptable learning rates and gradient clipping.
+    A class that implements basic stochastic gradient descent (SGD) optimization.
 
     Attributes:
         parameters (list of AutoTensor): The parameters of the model to be optimized.
         lr (float): Learning rate for the optimizer.
-        clip_value (float, optional): Maximum allowed value for gradients, used for gradient clipping.
     """
 
-    def __init__(self, parameters, lr=0.01, clip_value=None):
+    def __init__(self, parameters, lr=0.01):
         """
         Initializes the Optimizer with the given parameters and learning rate.
 
         Parameters:
             parameters (list of AutoTensor): Model parameters to optimize.
             lr (float): Initial learning rate.
-            clip_value (float, optional): Threshold for gradient clipping; None disables clipping.
         """
         self.parameters = parameters
         self.lr = lr
-        self.clip_value = clip_value
     
     def step(self):
         """
         Performs a single optimization step (parameter update).
         """
         for p in self.parameters:
-            if self.clip_value is not None:
-                p.grad = np.clip(p.grad, -self.clip_value, self.clip_value)
             p.value -= self.lr * p.grad
     
     def zero_grad(self):
@@ -141,42 +137,148 @@ def data_loader(dataset, batch_size, shuffle=True, seed=None):
         yield x_batch, y_batch
 
 
-def train(model, data_loader, optimizer, loss_fn, epochs):
+
+
+
+def mse_loss(predictions, targets):
+    mse = sum((y-y_pred) ** 2 for y_pred, y in zip(predictions, targets))/len(targets)
+    return mse
+
+
+import matplotlib.pyplot as plt
+
+def train_and_validate(model, X_train, y_train, X_val, y_val, optimizer, loss_fn:Callable, metric:Callable, epochs, eval_every:int=100):
     """
-    Train the model using batches of data.
+    Train and validate the model using the entire dataset.
+
+    Parameters:
+        model: The model to be trained and validated.
+        X_train: List of training samples.
+        y_train: List of labels corresponding to the training samples.
+        X_val: List of validation samples.
+        y_val: List of labels corresponding to the validation samples.
+        optimizer: Optimizer object to adjust model weights.
+        loss_fn: Function to compute the loss between predictions and true values.
+        metric: Function to compute the accuracy or other performance metrics.
+        epochs (int): Number of complete passes through the dataset.
+        eval_every (int): Frequency of epochs to run validation.
+    """
+    train_losses = []
+    val_losses = []
+    train_metrics = []
+    val_metrics = []
+
+    for epoch in range(epochs):
+        # Forward pass on training data
+        y_preds_train = [model(x) for x in X_train]
+        loss_train = loss_fn(y_preds_train, y_train)
+        metric_train = metric(y_preds_train, y_train)
+
+        # Backward pass and optimization
+        optimizer.zero_grad()
+        loss_train.backward()
+        optimizer.step()
+
+        train_losses.append(loss_train.value)
+        train_metrics.append(metric_train)
+
+
+
+        # Validation phase
+        if epoch % eval_every == 0:
+            y_preds_val = [model(x) for x in X_val]
+            loss_val = loss_fn(y_preds_val, y_val)
+            metric_val = metric(y_preds_val, y_val)
+            val_losses.append(loss_val.value)
+            val_metrics.append(metric_val)
+            print(f"Epoch {epoch + 1}: Train Loss = {loss_train.value:.4f}, Train Metric = {metric_train:.4f}, Validation Loss = {loss_val.value:.4f}, Validation Metric = {metric_val:.4f}")
+            # apply early stopping
+            if loss_val.value < 0.1:
+                print(f'Iteration: {epoch}, Loss: {loss_val.value}')
+                break
+        else:
+            print(f"Epoch {epoch + 1}: Train Loss = {loss_train.value:.4f}, Train Metric = {metric_train:.4f}")
+
+        
+    plot_history(train_losses, val_losses, train_metrics, val_metrics, eval_every)
+
+    return train_losses, val_losses, train_metrics, val_metrics
+
+
+
+def plot_history(train_losses, val_losses, train_metrics, val_metrics, eval_every, title='Training and Validation Performance'):
+    """
+    Plot the training and validation loss and metrics over epochs.
+
+    Parameters:
+        train_losses (list of float): List of training losses per epoch.
+        val_losses (list of float): List of validation losses at specified intervals.
+        train_metrics (list of float): List of training metrics per epoch.
+        val_metrics (list of float): List of validation metrics at specified intervals.
+        eval_every (int): Frequency of epochs at which validation was performed.
+        title (str): Title for the plot.
+    """
+    epochs = len(train_losses)  # Total number of epochs
+    validation_epochs = range(0, epochs, eval_every)  # Epochs at which validation was performed
+
+    plt.figure(figsize=(12, 6))
+
+    # Plot for losses
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(validation_epochs, val_losses, label='Validation Loss', linestyle='--')
+    plt.title('Loss over Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # Plot for metrics
+    plt.subplot(1, 2, 2)
+    plt.plot(train_metrics, label='Train Metric')
+    plt.plot(validation_epochs, val_metrics, label='Validation Metric', linestyle='--')
+    plt.title('Metric over Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Metric')
+    plt.legend()
+
+    plt.suptitle(title)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust the rect so the title fits without overlap
+    plt.show()
+    plt.savefig('../mlp-training-plot.png')
+
+def train(model, X_train, y_train, optimizer, loss_fn,metric, epochs):
+    """
+    Train the model using the entire dataset.
 
     Parameters:
         model: The model to be trained.
-        data_loader: Function that yields batches of data.
+        X_train: List of training samples.
+        y_train: List of labels corresponding to the training samples.
         optimizer: Optimizer object to adjust model weights.
         loss_fn: Function to compute the loss between predictions and true values.
         epochs (int): Number of complete passes through the dataset.
     """
     for epoch in range(epochs):
-        total_loss = 0
-        batch_count = 0
+        
+        # Forward pass
+        y_preds = [model(x) for x in X_train]
+        #loss = sum((y-y_pred) ** 2 for y_pred, y in zip(y_preds, y_train))
+        loss = mse_loss(y_preds, y_train)
+        print(loss)
+        metric_score = metric(y_preds, y_train)
+        # Backward pass
+        loss.backward()
 
-        for x_batch, y_batch in data_loader:
-            optimizer.zero_grad()
+        # Update weights
+        optimizer.step()
+        #for p in model.parameters():
+        #    p.value += -0.01 * p.grad
 
-            # Forward pass
-            predictions = [model(x) for x in x_batch]
-            loss, metric = loss_fn(predictions, y_batch)
-            total_loss += loss.value  # Assuming loss is returned as an AutoTensor
-            batch_count += 1
+        # Reset gradients
+        optimizer.zero_grad()
 
-            # Backward pass
-            loss.backward()
-
-            # Update weights
-            optimizer.step()
-        print(f"Epoch {epoch + 1}: metric = {metric}")
-
-        if batch_count > 0:
-            average_loss = total_loss / batch_count
-            print(f"Epoch {epoch + 1}: Average Loss = {average_loss:.4f}")
-        else:
-            print(f"Epoch {epoch + 1}: No data processed. Check data loader or batch size.")
+        # Output the loss and metric for this epoch
+        print(f"Epoch {epoch + 1}: Loss = {loss.value:.4f}, Metric = {metric_score:.4f}")
 
 
 
@@ -209,7 +311,11 @@ def accuracy(predictions, labels):
     Returns:
         float: The accuracy of predictions.
     """
-    correct = np.sum(predictions == labels)
+    pred_values = [p.value for p in predictions]
+
+    # Convert predictions to binary outcomes based on the threshold, 0 for tanh, 0.5 for sigmoid
+    preds = np.where(np.array(pred_values) > 0, 1, -1)
+    correct = np.sum(preds == np.array(labels))
     total = len(labels)
     return correct / total
 
