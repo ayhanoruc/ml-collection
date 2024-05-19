@@ -7,6 +7,9 @@
 - [X] ml/linear&logistic regression
 - [ ] ml/decision tree
 - [ ] ml/pca
+- [x] genai/RNN
+- [ ] genai/LSTM&GRU
+- [ ] genai/xLSTM
 - [ ] genai/Tokenizer
 - [ ] genai/transformers
 - [ ] genai/Llama2
