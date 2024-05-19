@@ -4,7 +4,7 @@
 
 - [X] dl/MLP : AutoTensor, NeuralStructures, Trainer
 - [ ] dl/MLP : regularization, batch data loader
-- [ ] ml/linear&logistic regression
+- [X] ml/linear&logistic regression
 - [ ] ml/decision tree
 - [ ] ml/pca
 - [ ] genai/Tokenizer
