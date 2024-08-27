@@ -140,3 +140,98 @@ class ImageBatchGenerator:
         except IndexError:
             print("data label out of range, the model knows only the following classes: ", self.classes)
             return None
+
+class ManualConvLayer:
+    def __init__(self,kernel_shape=(3,3),kernel_count:int=5,stride:int=1,padding:int=0) -> None:
+        self.kernel_x , self.kernel_y = kernel_shape
+        self.kernel_count = kernel_count
+        self.stride = stride
+        self.padding = padding
+        # here kernels and their corresponding biases are learned parameters
+        # He initialization
+        fan_in = self.kernel_x * self.kernel_y * 3
+        stddev = np.sqrt(2 / fan_in)
+        self.weights = np.random.randn(self.kernel_count, self.kernel_x, self.kernel_y) * stddev
+        self.biases = np.random.randn(self.kernel_count)
+
+    def forward(self,img_batch:np.ndarray) -> np.ndarray:
+        img_x,img_y,img_channels,batch_size = img_batch.shape
+
+        self.output_x = (img_x - self.kernel_x + 2 * self.padding) // self.stride + 1
+        self.output_y = (img_y - self.kernel_y + 2 * self.padding) // self.stride + 1
+        self.output =  np.zeros((self.output_x, self.output_y, img_channels, self.kernel_count, batch_size))
+        self.weights = np.nan_to_num(self.weights)
+        self.biases = np.nan_to_num(self.biases)
+        self.padded_image = np.zeros((img_x + 2 * self.padding, img_y + 2 * self.padding, img_channels, self.kernel_count, batch_size))
+        
+        # padd all batch images for each kernel, think it of as parallel strings.
+        for k in range(self.kernel_count):
+            self.padded_image[self.padding:img_x + self.padding, self.padding:img_y + self.padding, :, k, :] = img_batch
+
+        # TODO: vectorize - parallelize this loop
+        for i in range(batch_size):
+            padded_img = self.padded_image[:, :, :, :, i]
+            for c in range(img_channels):
+                for k in range(self.kernel_count):
+                    for y in range(self.output_y):
+                        for x in range(self.output_x):
+                            # adjusting the current sliding window
+                            x_start = x * self.stride
+                            x_end = x_start + self.kernel_x
+                            y_start = y*self.stride
+                            y_end = y_start + self.kernel_y
+                            current_window = padded_img[x_start:x_end, y_start:y_end, c, k]
+                            self.output[x, y, c, k, i] = np.sum(np.multiply(current_window, self.weights[k])) + self.biases[k].astype("float64")
+
+        # now we need to sum the convolutions over all channels: axis=2
+        self.output = self.output.sum(axis=2)
+        # now lets save the input as well (for backpropagation)
+        self.input = img_batch
+        return self.output
+        
+
+
+class PoolingLayer:
+    def __init__(self,method:str=None,kernel_shape:Tuple[int,int]=(3,3),stride:int=1) -> None:
+        methods = {
+            "average":np.mean,
+            "max":np.max,
+            "min":np.min
+        }
+        self.method = methods.get(method,np.max)
+        self.kernel_shape = kernel_shape
+        self.stride = stride
+
+    def forward(self, img_batch:np.ndarray) -> np.ndarray:
+        self.img_x, self.img_y, self.img_channels, self.batch_size = img_batch.shape
+        print("batch_size",self.batch_size)
+        print("img_channels",self.img_channels)
+        self.inputs = img_batch
+        self.output_x = (self.img_x - self.kernel_shape[0]) // self.stride + 1
+        self.output_y = (self.img_y - self.kernel_shape[1]) // self.stride + 1
+        self.output = np.zeros((self.output_x, self.output_y, self.img_channels, self.batch_size)) # no need for kernel count since pooling is done per channel
+        # and not added over channels
+        padded_image = img_batch
+        self.mask = padded_image.copy()
+        for i in range(self.batch_size):
+
+            current_padded_img = padded_image[:, :, :, i]
+            for c in range(self.img_channels):
+                for y in range(self.output_y):
+                    for x in range(self.output_x):
+                        x_start = x * self.stride
+                        x_end = x_start + self.kernel_shape[0]
+                        y_start = y*self.stride
+                        y_end = y_start + self.kernel_shape[1]
+                        current_window = current_padded_img[x_start:x_end, y_start:y_end, c]
+                        val = float(self.method(current_window))
+                        self.output[x, y, c, i] = val
+
+                        # then we have to keep track of the indices that contributed to the max value
+                        # for backpropagation
+                        indices = np.where(current_window == val)
+                        self.mask[x_start + indices[0], y_start + indices[1], c, i] = 1
+            print(f"FINISHED element {i}/{self.batch_size}")
+
+        return self.output
+                        
