@@ -141,10 +141,12 @@ class ImageBatchGenerator:
             print("data label out of range, the model knows only the following classes: ", self.classes)
             return None
 
+
+
 class ManualConvLayer:
     def __init__(self,kernel_shape=(3,3),kernel_count:int=5,stride:int=1,padding:int=0) -> None:
         self.kernel_x , self.kernel_y = kernel_shape
-        self.kernel_count = kernel_count
+        self.kernel_count = kernel_count # represents the number of output feature maps (or channels)
         self.stride = stride
         self.padding = padding
         # here kernels and their corresponding biases are learned parameters
@@ -184,6 +186,7 @@ class ManualConvLayer:
                             self.output[x, y, c, k, i] = np.sum(np.multiply(current_window, self.weights[k])) + self.biases[k].astype("float64")
 
         # now we need to sum the convolutions over all channels: axis=2
+        # Summing across the input channels (axis=2) effectively combines the contributions from each input channel for a given kernel and spatial location.
         self.output = self.output.sum(axis=2)
         # now lets save the input as well (for backpropagation)
         self.input = img_batch
@@ -192,6 +195,7 @@ class ManualConvLayer:
 
 
 class PoolingLayer:
+    # pooling layer doesnt have a learnable parameter.
     def __init__(self,method:str=None,kernel_shape:Tuple[int,int]=(3,3),stride:int=1) -> None:
         methods = {
             "average":np.mean,
@@ -235,3 +239,52 @@ class PoolingLayer:
 
         return self.output
                         
+
+# flattening layer will , for each image in the batch, flatten the image into a 1D array
+# of L = W * H * C length, where C is the number of channels : features to our fully connected layer
+class Flatten:
+    def forward(self, img_batch:np.ndarray) -> np.ndarray:
+        # TODO: a more robust way would be getting batch_matrix, batch_size, img_x, img_y, img_channels explicitly
+        # then reshaping the batch_matrix to (batch_size, img_x * img_y * img_channels)
+        self.batch_size = img_batch.shape[0]
+        self.inputs = img_batch
+        self.output = img_batch.reshape(self.batch_size,-1 )
+        # this requires the batch_size dim to be the first dimension
+        # so there is a difference between this and the following implementation!
+        # tells the numpy to infer required dimension
+        # for the first dimension so that there are to be flattened batch_sized rows. 
+        return self.output
+    
+class Flatten2: # this is way explicit implementation but doesnt utilize vectorization
+    def forward(self, img_batch:np.ndarray) -> np.ndarray:
+        self.img_x, self.img_y, self.img_channels,self.batch_size = img_batch.shape
+        self.inputs = img_batch
+        L = self.img_x * self.img_y * self.img_channels
+        self.output = np.zeros((self.batch_size, L))
+        for i in range(self.batch_size):
+            self.output[i,:] = img_batch[:, :, :,i].reshape((1,L)) # or flatten()
+        return self.output
+
+
+
+class SigmoidAct:
+    def forward(self,batch_matrix:np.array)-> np.array:
+        # sigmoid maps -inf,inf -> 0,1
+        self.output = np.clip(1/(1+np.exp(-batch_matrix)),1e-7,1- 1e-7)
+        self.input = batch_matrix
+    
+    def backward(self,outer_deriv)->np.array:
+        inner_deriv = self.output * (1-self.output) # sigmoid x (1-sigmoid)
+        self.dinputs = np.multiply(outer_deriv, inner_deriv ) 
+
+class TanhAct:
+    # tanh maps -inf,inf -> -1,1
+
+    def forward(self,batch_matrix:np.array)-> np.array:
+        self.output = np.tanh(batch_matrix)
+        self.input = batch_matrix
+
+    def backward(self,outer_deriv)->np.array:
+        inner_deriv = 1 - self.output**2
+        self.dinputs = np.multiply(outer_deriv, inner_deriv ) 
+    
