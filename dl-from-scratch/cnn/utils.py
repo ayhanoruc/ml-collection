@@ -214,6 +214,11 @@ class PoolingLayer:
         self.output_x = (self.img_x - self.kernel_shape[0]) // self.stride + 1
         self.output_y = (self.img_y - self.kernel_shape[1]) // self.stride + 1
         self.output = np.zeros((self.output_x, self.output_y, self.img_channels, self.batch_size)) # no need for kernel count since pooling is done per channel
+        
+        self.values_of_interest = np.zeros((self.kernel_shape[0]*self.kernel_shape[1],2,self.output_x*self.output_y,self.img_channels,self.batch_size))
+        self.n_values_of_interest = np.zeros((self.output_x*self.output_y,self.img_channels,self.batch_size))
+
+
         # and not added over channels
         padded_image = img_batch
         self.mask = padded_image.copy()
@@ -221,8 +226,10 @@ class PoolingLayer:
 
             current_padded_img = padded_image[:, :, :, i]
             for c in range(self.img_channels):
+                ct = 0
                 for y in range(self.output_y):
                     for x in range(self.output_x):
+                        ct += 1
                         x_start = x * self.stride
                         x_end = x_start + self.kernel_shape[0]
                         y_start = y*self.stride
@@ -230,6 +237,13 @@ class PoolingLayer:
                         current_window = current_padded_img[x_start:x_end, y_start:y_end, c]
                         val = float(self.method(current_window))
                         self.output[x, y, c, i] = val
+
+                        val_x,val_y = np.where(current_window == val)
+                        # we can have more than one value of interest
+                        for ii, (vx,vy) in enumerate(zip(val_x,val_y)):
+                            self.values_of_interest[ii,0,ct-1,c,i] = vx
+                            self.values_of_interest[ii,1,ct-1,c,i] = vy
+                        self.n_values_of_interest[ct-1,c,i] = ii+1 # for backpropagation
 
                         # then we have to keep track of the indices that contributed to the max value
                         # for backpropagation
@@ -243,6 +257,7 @@ class PoolingLayer:
 # flattening layer will , for each image in the batch, flatten the image into a 1D array
 # of L = W * H * C length, where C is the number of channels : features to our fully connected layer
 class Flatten:
+
     def forward(self, img_batch:np.ndarray) -> np.ndarray:
         # TODO: a more robust way would be getting batch_matrix, batch_size, img_x, img_y, img_channels explicitly
         # then reshaping the batch_matrix to (batch_size, img_x * img_y * img_channels)
@@ -254,8 +269,15 @@ class Flatten:
         # tells the numpy to infer required dimension
         # for the first dimension so that there are to be flattened batch_sized rows. 
         return self.output
-    
+
+    def backward(self, outer_deriv:np.ndarray) -> np.ndarray:
+        # no derivatives needes, just re-arrange(reshape) the lower level derivatives
+        # into the input shape of the flatten layer
+        return outer_deriv.reshape(self.inputs.shape)
+
+
 class Flatten2: # this is way explicit implementation but doesnt utilize vectorization
+
     def forward(self, img_batch:np.ndarray) -> np.ndarray:
         self.img_x, self.img_y, self.img_channels,self.batch_size = img_batch.shape
         self.inputs = img_batch
@@ -264,6 +286,12 @@ class Flatten2: # this is way explicit implementation but doesnt utilize vectori
         for i in range(self.batch_size):
             self.output[i,:] = img_batch[:, :, :,i].reshape((1,L)) # or flatten()
         return self.output
+    
+    def backward(self, outer_deriv:np.ndarray)->np.ndarray:
+        self.dinputs = np.zeros(self.inputs.shape)
+        for i in range(self.batch_size):
+            self.dinputs[:,:,:,i] = outer_deriv[i,:].reshape(self.img_x,self.img_y,self.img_channels)
+        return self.dinputs
 
 
 
@@ -272,10 +300,12 @@ class SigmoidAct:
         # sigmoid maps -inf,inf -> 0,1
         self.output = np.clip(1/(1+np.exp(-batch_matrix)),1e-7,1- 1e-7)
         self.input = batch_matrix
+        return self.output
     
     def backward(self,outer_deriv)->np.array:
         inner_deriv = self.output * (1-self.output) # sigmoid x (1-sigmoid)
         self.dinputs = np.multiply(outer_deriv, inner_deriv ) 
+        return self.dinputs
 
 class TanhAct:
     # tanh maps -inf,inf -> -1,1
@@ -283,8 +313,9 @@ class TanhAct:
     def forward(self,batch_matrix:np.array)-> np.array:
         self.output = np.tanh(batch_matrix)
         self.input = batch_matrix
+        return self.output
 
     def backward(self,outer_deriv)->np.array:
         inner_deriv = 1 - self.output**2
         self.dinputs = np.multiply(outer_deriv, inner_deriv ) 
-    
+        return self.dinputs
