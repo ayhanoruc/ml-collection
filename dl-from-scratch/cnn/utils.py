@@ -198,7 +198,7 @@ class PoolingLayer:
     # pooling layer doesnt have a learnable parameter.
     def __init__(self,method:str=None,kernel_shape:Tuple[int,int]=(3,3),stride:int=1) -> None:
         methods = {
-            "average":np.mean,
+            "average":np.mean, # TODO: actually this requires different implementation
             "max":np.max,
             "min":np.min
         }
@@ -226,10 +226,11 @@ class PoolingLayer:
 
             current_padded_img = padded_image[:, :, :, i]
             for c in range(self.img_channels):
-                ct = 0
+                slice_i = 0
                 for y in range(self.output_y):
-                    for x in range(self.output_x):
-                        ct += 1
+                    for x in range(self.output_x): # this inner loop actually defines a complete slice, and
+                        # for each channel-feature map, we expect self.output_x*self.output_y slices.
+                        slice_i += 1
                         x_start = x * self.stride
                         x_end = x_start + self.kernel_shape[0]
                         y_start = y*self.stride
@@ -241,17 +242,41 @@ class PoolingLayer:
                         val_x,val_y = np.where(current_window == val)
                         # we can have more than one value of interest
                         for ii, (vx,vy) in enumerate(zip(val_x,val_y)):
-                            self.values_of_interest[ii,0,ct-1,c,i] = vx
-                            self.values_of_interest[ii,1,ct-1,c,i] = vy
-                        self.n_values_of_interest[ct-1,c,i] = ii+1 # for backpropagation
+                            self.values_of_interest[ii,0,slice_i-1,c,i] = vx
+                            self.values_of_interest[ii,1,slice_i-1,c,i] = vy
+                        self.n_values_of_interest[slice_i-1,c,i] = ii+1 # for backpropagation
 
                         # then we have to keep track of the indices that contributed to the max value
                         # for backpropagation
-                        indices = np.where(current_window == val)
-                        self.mask[x_start + indices[0], y_start + indices[1], c, i] = 1
+                        self.mask[x_start + val_x, y_start + val_y, c, i] = 1
+                # if c == 0:
+                #     print(f"for channel {c}, the max slice_i is {slice_i}")
             print(f"FINISHED element {i}/{self.batch_size}")
 
         return self.output
+    
+    def backward(self, outer_deriv:np.ndarray) -> np.ndarray:
+        x_outer,y_outer,n_channels,batch_size = outer_deriv.shape
+        self.dinputs = np.zeros_like(self.inputs)
+
+        for i in range(batch_size):
+            for c in range(n_channels):
+                slice_i = 0
+                for y in range(y_outer):
+                    for x in range(x_outer):
+                        slice_i += 1
+                        x_start = x * self.stride
+                        y_start = y*self.stride
+
+                        # how many maxima(actually value of interest determined by the pooling method)
+                        # exists in this slice  = n_values
+                        n_values = int(self.n_values_of_interest[slice_i-1,c,i])
+                        for idx in range(n_values):
+                            # then iterate thru it and for modify outer_deriv accordingly
+                            val_x = int(self.values_of_interest[idx,0,slice_i-1,c,i])
+                            val_y = int(self.values_of_interest[idx,1,slice_i-1,c,i])
+                            self.dinputs[x_start+val_x,y_start+val_y,c,i] = outer_deriv[x,y,c,i]
+        return self.dinputs
                         
 
 # flattening layer will , for each image in the batch, flatten the image into a 1D array
