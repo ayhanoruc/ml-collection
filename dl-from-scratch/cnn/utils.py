@@ -151,10 +151,10 @@ class ManualConvLayer:
         self.padding = padding
         # here kernels and their corresponding biases are learned parameters
         # He initialization
-        fan_in = self.kernel_x * self.kernel_y * 3
+        fan_in = self.kernel_x * self.kernel_y * kernel_count
         stddev = np.sqrt(2 / fan_in)
-        self.weights = np.random.randn(self.kernel_count, self.kernel_x, self.kernel_y) * stddev
-        self.biases = np.random.randn(self.kernel_count)
+        self.weights = np.random.randn(self.kernel_x, self.kernel_y,self.kernel_count) * stddev
+        self.biases = np.zeros((1,self.kernel_count))
 
     def forward(self,img_batch:np.ndarray) -> np.ndarray:
         img_x,img_y,img_channels,batch_size = img_batch.shape
@@ -167,6 +167,7 @@ class ManualConvLayer:
         self.padded_image = np.zeros((img_x + 2 * self.padding, img_y + 2 * self.padding, img_channels, self.kernel_count, batch_size))
         
         # padd all batch images for each kernel, think it of as parallel strings.
+        # FIXME: The padding is applied for each kernel separately, which is unnecessary and inefficient. Padding should be applied once to the input.
         for k in range(self.kernel_count):
             self.padded_image[self.padding:img_x + self.padding, self.padding:img_y + self.padding, :, k, :] = img_batch
 
@@ -183,7 +184,7 @@ class ManualConvLayer:
                             y_start = y*self.stride
                             y_end = y_start + self.kernel_y
                             current_window = padded_img[x_start:x_end, y_start:y_end, c, k]
-                            self.output[x, y, c, k, i] = np.sum(np.multiply(current_window, self.weights[k])) + self.biases[k].astype("float64")
+                            self.output[x, y, c, k, i] = np.sum(np.multiply(current_window, self.weights[:,:,k])) + self.biases[0,k].astype("float64")
 
         # now we need to sum the convolutions over all channels: axis=2
         # Summing across the input channels (axis=2) effectively combines the contributions from each input channel for a given kernel and spatial location.
@@ -191,12 +192,41 @@ class ManualConvLayer:
         # now lets save the input as well (for backpropagation)
         self.input = img_batch
         return self.output
+    
+
+    def backward(self,outer_deriv:np.ndarray)->np.ndarray:
+        
+        dbiases = np.zeros_like(self.biases)
+        dweights = np.zeros_like(self.weights)
+        x_pad,y_pad,c_pad,k_pad,i_pad = self.padded_image.shape
+        dinputs = np.zeros((x_pad,y_pad,c_pad,i_pad)) # we need to go from padded image -> (x,y,c,i) so we need to remove kernel dim.
+        x_outer,y_outer= outer_deriv.shape[0],outer_deriv.shape[1]
+        padded_img = self.padded_image[:,:,:,0,:] # to remove kernel dim.
+        
+        for i in range(i_pad):
+            current_padded_img = padded_img[:, :, :, i]
+            for c in range(c_pad):
+                for k in range(self.kernel_count):
+                    for y in range(y_outer):
+                        for x in range(x_outer):
+                            x_start = x * self.stride
+                            x_end = x_start + self.kernel_x
+                            y_start = y*self.stride
+                            y_end = y_start + self.kernel_y
+                            current_window = current_padded_img[x_start:x_end, y_start:y_end, c]
+                            # # accumulate the differential terms for input and weights
+                            dinputs[x_start:x_end, y_start:y_end, c, i] += self.weights[:,:,k]*outer_deriv[x,y,k,i] 
+                            dweights[:,:,k] += current_window * outer_deriv[x,y,k,i]  
+                    # after convolving this kernel, calculate/accumulate the differential term for bias
+                    dbiases[0,k] += np.sum(np.sum(outer_deriv[:,:,k,i],axis=0),axis=0)
+        dinputs = dinputs[self.padding:x_pad-self.padding,self.padding:y_pad-self.padding,:,:]
+        return dinputs
         
 
 
 class PoolingLayer:
     # pooling layer doesnt have a learnable parameter.
-    def __init__(self,method:str=None,kernel_shape:Tuple[int,int]=(3,3),stride:int=1) -> None:
+    def __init__(self,method:str,kernel_shape:Tuple[int,int]=(3,3),stride:int=1) -> None:
         methods = {
             "average":np.mean, # TODO: actually this requires different implementation
             "max":np.max,
@@ -343,4 +373,126 @@ class TanhAct:
     def backward(self,outer_deriv)->np.array:
         inner_deriv = 1 - self.output**2
         self.dinputs = np.multiply(outer_deriv, inner_deriv ) 
+        return self.dinputs
+    
+
+
+class SGDOptimizer:
+    def __init__(self,lr:0.01,lr_decay_rate:float= None,momentum:float = None):
+        self.learning_rate = lr
+        self.lr_decay_rate = lr_decay_rate
+        self.current_learning_rate = lr
+        self.iterations = 0
+        self.momentum = momentum
+
+    def pre_params_update(self,):
+        # monothonic lr decay
+        # Rapid Initial Decay, Slow Long-Term Decay
+        # Asymptotic Behavior: altough the lr gets closer to zero, it never reaches to zero,
+        # ensuring that the optimizer keeps making progress, albeit at a very slow pace, even after many iterations 
+        if self.lr_decay_rate:
+            self.current_learning_rate = self.learning_rate/(1+self.iterations*self.lr_decay_rate)
+    
+    def update_params(self,layer):
+        # TODO: i may actually define a base abstract class for layer
+        """
+        - self.momentum: controls how much influence the previous momentum has on the current update.
+        - momentum helps to smooth out the weight updates by incorporating information from previous iterations
+        - momentum can help the optimizer to escape shallow local minima by allowing it to "roll over"
+          small bumps in the loss landscape.
+        - by accumulating momentum, the optimizer can move more quickly in consistent directions, 
+        leading to faster convergence.
+        """
+        if self.momentum:
+            if not hasattr(layer, "weight_momentums"):
+                layer.weight_momentums = np.zeros_like(layer.weights)
+                layer.bias_momentums   = np.zeros_like(layer.biases)
+            
+            weight_updates = self.momentum * layer.weight_momentums -\
+                self.current_learning_rate * layer.dweights
+            layer.weight_momentums = weight_updates
+            
+            bias_updates = self.momentum * layer.bias_momentums -\
+                self.current_learning_rate * layer.dbiases
+            layer.bias_momentums = bias_updates
+        
+        else: 
+            weight_updates = -self.current_learning_rate* layer.dweights
+            bias_updates   = -self.current_learning_rate* layer.dbiases
+        
+        layer.weights += weight_updates
+        layer.biases  += bias_updates
+
+    def post_params_update(self,):
+        self.iterations += 1
+
+
+class DenseLayer:
+    # classic fully connected layer
+    def __init__(self, n_inputs,n_neurons):
+        
+        self.weights = np.random.randn(n_inputs,n_neurons)
+        self.biases  = np.zeros((1,n_neurons))
+        
+    def forward(self,inputs):
+        self.output = np.dot(inputs,self.weights) + self.biases
+        self.inputs = inputs
+    
+    def backward(self, dvalues):
+        self.dweights = np.dot(self.inputs.T,dvalues)
+        self.dinputs  = np.dot(dvalues,self.weights.T)
+        self.dbiases  = np.sum(dvalues, axis = 0, keepdims = True)
+
+
+
+class ReluAct:
+    def forward(self,batch_matrix:np.array)-> np.array:
+        self.output = np.maximum(0,batch_matrix)
+        self.input = batch_matrix
+        return self.output
+    
+    def backward(self,outer_deriv)->np.array:
+        # filter out the negative values
+        self.dinputs = np.multiply(outer_deriv, np.int64(self.output > 0))
+        return self.dinputs
+    
+
+class SoftmaxAct:
+    def forward(self,batch_matrix:np.array)-> np.array:
+        # softmax maps -inf,inf -> 0,1 and the sum of the output is 1
+        # this is the output of the network
+        self.output = np.exp(batch_matrix - np.max(batch_matrix, axis=1, keepdims=True))
+        self.output /= np.sum(self.output, axis=1, keepdims=True) # probs.
+        self.input = batch_matrix
+        return self.output
+    
+    def backward(self,outer_deriv)->np.array:
+        # the derivative of softmax is softmax * (1 - softmax)
+        # we can use the derivative of the softmax function to calculate the derivative of the cross-entropy loss
+        self.dinputs = np.empty_like(outer_deriv)
+        for i, (single_output, single_dvalues) in enumerate(zip(self.output, outer_deriv)):
+            single_output = single_output.reshape(-1, 1)
+            jacobian_matrix = np.diagflat(single_output) - np.dot(single_output, single_output.T)
+            self.dinputs[i] = np.dot(jacobian_matrix, single_dvalues)
+        return self.dinputs
+    
+
+class CategoricalCrossEntropyLoss:
+    def forward(self,y_pred:np.array,y_true:np.array)-> np.array:
+        self.y_pred = y_pred
+        self.y_true = y_true
+        self.n_samples = y_pred.shape[0]
+        y_pred_clipped = np.clip(y_pred, 1e-7, 1 - 1e-7) # prevent division by 0
+        # calculate sample-wise loss
+        sample_losses = -np.sum(y_true * np.log(y_pred_clipped), axis=1)
+        # average loss
+        self.loss = np.mean(sample_losses)
+        return self.loss
+    
+    def backward(self,outer_deriv:np.array)->np.array:
+        n_samples = len(outer_deriv)
+        # normalize gradient
+        self.dinputs = -self.y_true / outer_deriv
+        # adjust gradient
+        self.dinputs = self.dinputs / n_samples
         return self.dinputs
