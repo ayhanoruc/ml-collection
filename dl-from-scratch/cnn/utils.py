@@ -461,7 +461,9 @@ class SoftmaxAct:
     def forward(self,batch_matrix:np.array)-> np.array:
         # softmax maps -inf,inf -> 0,1 and the sum of the output is 1
         # this is the output of the network
+        # for numerical stability, we subtract the maximum value from the input matrix
         self.output = np.exp(batch_matrix - np.max(batch_matrix, axis=1, keepdims=True))
+        # the normalization will cancel out the shift effect and the output will not change
         self.output /= np.sum(self.output, axis=1, keepdims=True) # probs.
         self.input = batch_matrix
         return self.output
@@ -478,21 +480,51 @@ class SoftmaxAct:
     
 
 class CategoricalCrossEntropyLoss:
+    """
+    go thru basics of information theory:
+    - kl-divergence:quantifies how one probability distribution diverges from a second,
+      expected probability distribution : https://youtu.be/SxGYPqCgJWM?si=b2Nyse2VcAfMBKaa
+      - but this is not a true distance metric, it is not symmetric and does not satisfy the triangle inequality
+       neverthless its the backbone of cross-entropy
+    - cross-entropy: measures dissimilarity as the average number of bits needed to encode 
+        data from one distribution using the code optimized for another distribution.
+        Relationship to KL-Divergence:
+        D_KL(P || Q) = H(P, Q) - H(P)
+        Where H(P, Q) is cross-entropy and H(P) is the entropy of distribution P.
+    - categorical cross-entropy: is a specific form of cross-entropy when the true labels are 
+            one-hot encoded (e.g., in multi-class classification)
+    - Loss = - Σ (y_i * log(p_i)) for i in range(K)
+    """
     def forward(self,y_pred:np.array,y_true:np.array)-> np.array:
         self.y_pred = y_pred
         self.y_true = y_true
         self.n_samples = y_pred.shape[0]
         y_pred_clipped = np.clip(y_pred, 1e-7, 1 - 1e-7) # prevent division by 0
-        # calculate sample-wise loss
-        sample_losses = -np.sum(y_true * np.log(y_pred_clipped), axis=1)
-        # average loss
-        self.loss = np.mean(sample_losses)
-        return self.loss
+        # if even a single zero-confidence prediction is made, the batch loss will be infinite
+        # which is disaster :D
+        # calculate sample-wise negative log-likelihood 
+        #sample_losses = -np.sum(y_true * np.log(y_pred_clipped), axis=1)
+        # NOTE: keep in mind that this negative log-likelihood is derived from
+        # binomial distribution and maximum likelihood estimation.(log is for computational convenience)
+        # and simplifies to negative log of the predicted probability for the correct class 
+        # due to one-hot encoding (for both binary and multi-class classification).
+        # batch loss
+        #self.loss = np.mean(sample_losses)
+
+        if len(y_true.shape) == 1: # sparse
+            correct_confidences = y_pred_clipped[range(self.n_samples), y_true]
+            #y_true = np.eye(len(y_pred[0]))[y_true]
+        elif len(y_true.shape) == 2: # one-hot encoded
+            correct_confidences = np.sum(y_pred_clipped*y_true,axis=1)
+
+        neg_log_likelihoods = -np.log(correct_confidences)
+
+        return neg_log_likelihoods
     
     def backward(self,outer_deriv:np.array)->np.array:
         n_samples = len(outer_deriv)
-        # normalize gradient
-        self.dinputs = -self.y_true / outer_deriv
-        # adjust gradient
-        self.dinputs = self.dinputs / n_samples
+        if len(self.y_true.shape) == 1:
+            n_labels = len(outer_deriv[0])
+            y_true = np.eye(n_labels)[self.y_true]
+        self.dinputs = -y_true / outer_deriv / n_samples
         return self.dinputs
