@@ -79,13 +79,33 @@ class ImageBatchGenerator:
         self.labels = {class_name:np.zeros(self.class_lengths[class_name]) + self.class_map[class_name] for class_name in self.classes}
         self.all_labels = np.concatenate(list(self.labels.values()))
         self.all_img_paths = np.concatenate(list(self.data_map.values()))
-
-        self.batch_img_paths, self.batch_labels = self.select_balanced_batch_indices()
-
+        # now lets holdout 10% of the self.all_img_paths for validating & 10% for testing (make sure they are balanced as well)
+        n_samples = int(0.1*len(self.all_img_paths))
+        print("n_samples",n_samples)
+        self.val_img_paths,self.val_labels = self.select_balanced_batch_indices(n_samples)
+        remove_mask = ~np.isin(self.all_img_paths,self.val_img_paths)
+        self.all_img_paths = self.all_img_paths[remove_mask]
+        self.test_img_paths,self.test_labels = self.select_balanced_batch_indices(n_samples)
+        remove_mask = ~np.isin(self.all_img_paths,self.test_img_paths)
+        self.all_img_paths = self.all_img_paths[remove_mask]
         self.network_input_x, self.network_input_y = self.network_input_size
+        
+    def return_val_test_batches(self,):
+        val_tuple = self.prepare_batch(self.val_img_paths),self.val_labels
+        test_tuple = self.prepare_batch(self.test_img_paths),self.test_labels
+        return val_tuple,test_tuple
 
-        self.batch_matrix = np.zeros((self.network_input_x, self.network_input_y, 3,self.batch_size))
-        for i, img_path in enumerate(self.batch_img_paths):
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.batch_img_paths, self.batch_labels = self.select_balanced_batch_indices(self.batch_size)
+        return self.prepare_batch(self.batch_img_paths)
+
+
+    def prepare_batch(self,batch_img_paths):
+        self.batch_matrix = np.zeros((self.network_input_x, self.network_input_y, 3,len(batch_img_paths)))
+        for i, img_path in enumerate(batch_img_paths):
             img = Image.open(img_path)
             img = img.resize((self.network_input_x, self.network_input_y))
             img = np.array(img)
@@ -94,6 +114,7 @@ class ImageBatchGenerator:
             self.batch_matrix[:, :, :, i] = img # put the image in the batch matrix
         # then at the end make sure its in 8bits representation
         self.batch_matrix = self.batch_matrix.astype("uint8")
+        return self.batch_matrix
         
     def visualize_batch(self) -> None:
         # lets create a grid of square
@@ -108,7 +129,7 @@ class ImageBatchGenerator:
         plt.show()
     
 
-    def select_balanced_batch_indices(self) -> Tuple[np.ndarray, np.ndarray]:
+    def select_balanced_batch_indices(self,batch_size) -> Tuple[np.ndarray, np.ndarray]:
         """
         Selects a balanced batch of indices, ensuring equal representation of each class.
 
@@ -116,7 +137,7 @@ class ImageBatchGenerator:
             Tuple[np.ndarray, np.ndarray]: A tuple containing the batch image paths and labels.
         """
         num_classes = len(self.data_map)
-        samples_per_class = self.batch_size // num_classes
+        samples_per_class = batch_size // num_classes
 
         batch_img_paths = []
         batch_labels = []
@@ -196,8 +217,8 @@ class ManualConvLayer:
 
     def backward(self,outer_deriv:np.ndarray)->np.ndarray:
         
-        dbiases = np.zeros_like(self.biases)
-        dweights = np.zeros_like(self.weights)
+        self.dbiases = np.zeros_like(self.biases)
+        self.dweights = np.zeros_like(self.weights)
         x_pad,y_pad,c_pad,k_pad,i_pad = self.padded_image.shape
         dinputs = np.zeros((x_pad,y_pad,c_pad,i_pad)) # we need to go from padded image -> (x,y,c,i) so we need to remove kernel dim.
         x_outer,y_outer= outer_deriv.shape[0],outer_deriv.shape[1]
@@ -216,9 +237,9 @@ class ManualConvLayer:
                             current_window = current_padded_img[x_start:x_end, y_start:y_end, c]
                             # # accumulate the differential terms for input and weights
                             dinputs[x_start:x_end, y_start:y_end, c, i] += self.weights[:,:,k]*outer_deriv[x,y,k,i] 
-                            dweights[:,:,k] += current_window * outer_deriv[x,y,k,i]  
+                            self.dweights[:,:,k] += current_window * outer_deriv[x,y,k,i]  
                     # after convolving this kernel, calculate/accumulate the differential term for bias
-                    dbiases[0,k] += np.sum(np.sum(outer_deriv[:,:,k,i],axis=0),axis=0)
+                    self.dbiases[0,k] += np.sum(np.sum(outer_deriv[:,:,k,i],axis=0),axis=0)
         dinputs = dinputs[self.padding:x_pad-self.padding,self.padding:y_pad-self.padding,:,:]
         return dinputs
         
@@ -437,11 +458,13 @@ class DenseLayer:
     def forward(self,inputs):
         self.output = np.dot(inputs,self.weights) + self.biases
         self.inputs = inputs
+        return self.output
     
     def backward(self, dvalues):
         self.dweights = np.dot(self.inputs.T,dvalues)
         self.dinputs  = np.dot(dvalues,self.weights.T)
         self.dbiases  = np.sum(dvalues, axis = 0, keepdims = True)
+        return self.dinputs
 
 
 
@@ -510,7 +533,6 @@ class CategoricalCrossEntropyLoss:
         # due to one-hot encoding (for both binary and multi-class classification).
         # batch loss
         #self.loss = np.mean(sample_losses)
-
         if len(y_true.shape) == 1: # sparse
             correct_confidences = y_pred_clipped[range(self.n_samples), y_true]
             #y_true = np.eye(len(y_pred[0]))[y_true]
@@ -524,7 +546,7 @@ class CategoricalCrossEntropyLoss:
     def backward(self,outer_deriv:np.array)->np.array:
         n_samples = len(outer_deriv)
         if len(self.y_true.shape) == 1:
-            n_labels = len(outer_deriv[0])
+            n_labels = len(outer_deriv)
             y_true = np.eye(n_labels)[self.y_true]
         self.dinputs = -y_true / outer_deriv / n_samples
         return self.dinputs
