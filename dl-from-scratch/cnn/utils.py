@@ -6,7 +6,9 @@ from scipy.signal import convolve2d
 from typing import Union, Tuple, List, Dict
 from PIL import Image
 import glob
-
+from torch.utils.data import Dataset
+import torchvision 
+import torch
 
 
 main_data_path = r"C:\Users\ayhan\Desktop\ml-collection\data"
@@ -96,11 +98,13 @@ class ImageBatchGenerator:
         return val_tuple,test_tuple
 
     def __iter__(self):
+        print("iter called")
         return self
 
     def __next__(self):
+        print("next called")
         self.batch_img_paths, self.batch_labels = self.select_balanced_batch_indices(self.batch_size)
-        return self.prepare_batch(self.batch_img_paths)
+        return {"labels":self.batch_labels,"batch_matrix":self.prepare_batch(self.batch_img_paths)}
 
 
     def prepare_batch(self,batch_img_paths):
@@ -109,9 +113,16 @@ class ImageBatchGenerator:
             img = Image.open(img_path)
             img = img.resize((self.network_input_x, self.network_input_y))
             img = np.array(img)
-            if len(img.shape) == 2: # if the image is grayscale
-                img = np.stack((img,)*3, axis=-1)
-            self.batch_matrix[:, :, :, i] = img # put the image in the batch matrix
+            try:
+                if len(img.shape) == 2: # if the image is grayscale
+                    img = np.stack((img,)*3, axis=-1)
+                if len(img.shape) == 3 and img.shape[2] == 4:# if the image has alpha channel
+                    img = img[:,:,:3]
+                self.batch_matrix[:, :, :, i] = img # put the image in the batch matrix
+            except:
+                print("error occured at image:",i)
+                print("img matrix",img)
+                print("img shape:",img.shape)
         # then at the end make sure its in 8bits representation
         self.batch_matrix = self.batch_matrix.astype("uint8")
         return self.batch_matrix
@@ -151,16 +162,39 @@ class ImageBatchGenerator:
         combined = list(zip(batch_img_paths, batch_labels))
         np.random.shuffle(combined)
         batch_img_paths, batch_labels = zip(*combined)
-
+        # convert batch_label strings to integers
+        batch_labels = np.array([self.class_map[label] for label in batch_labels])
         return np.array(batch_img_paths), np.array(batch_labels)
 
 
-    def invert_label(self,label:int) -> str:
-        try: 
-            return self.classes[label]
-        except IndexError:
-            print("data label out of range, the model knows only the following classes: ", self.classes)
-            return None
+    def invert_labels(self,labels:Union[int,np.ndarray,List[int]])->Union[str,List[str],np.ndarray]:
+        if isinstance(labels,int):
+            try:
+                return self.classes[labels]
+            except IndexError:
+                print("data label out of range, the model knows only the following classes: ", self.classes)
+
+        labels_array = np.array(labels)
+        class_array = np.array(self.classes)
+        # Check if any label is out of range
+        if np.any((labels_array < 0) | (labels_array >= len(class_array))):
+            print("Warning: Some labels are out of range. The model knows only the following classes:", self.classes)
+            # Create a mask for valid indices
+            valid_mask = (labels_array >= 0) & (labels_array < len(class_array))
+            # Initialize result array with None
+            result = np.full(labels_array.shape, None, dtype=object)
+            # Fill in valid labels
+            result[valid_mask] = class_array[labels_array[valid_mask]]
+        else:
+            result = class_array[labels_array]
+        
+        if np.isscalar(labels):
+            return result.item()
+        elif isinstance(labels, list):
+            return result.tolist()
+        else:
+            return result
+
 
 
 
@@ -195,7 +229,7 @@ class ManualConvLayer:
         # TODO: vectorize - parallelize this loop
         for i in range(batch_size):
             padded_img = self.padded_image[:, :, :, :, i]
-            for c in range(img_channels):
+            for c in range(img_channels): # ideally we would convolve over all channels at once for each kernel, without iterating over channels.
                 for k in range(self.kernel_count):
                     for y in range(self.output_y):
                         for x in range(self.output_x):
@@ -550,3 +584,49 @@ class CategoricalCrossEntropyLoss:
             y_true = np.eye(n_labels)[self.y_true]
         self.dinputs = -y_true / outer_deriv / n_samples
         return self.dinputs
+    
+
+class AnimalsDataset(Dataset):
+    def __init__(self, img_batch_generator: ImageBatchGenerator,transform = None,img_paths=None,labels=None):
+        self.batch_generator = img_batch_generator
+        self.class_map = self.batch_generator.class_map
+        if img_paths is None or labels is None:
+            # use all images for training set
+            self.img_paths = self.batch_generator.all_img_paths
+            self.labels = self.batch_generator.all_labels
+        else:
+            # use provided img_paths and labels for validation/test sets
+            self.img_paths = img_paths
+            self.labels = labels
+        self.invert_labels = self.batch_generator.invert_labels # inherit.
+        if transform is None:
+            self.transform = torchvision.transforms.Compose([
+                torchvision.transforms.ToTensor(),
+                torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # to align with ImageNet dataset for later transfer learning studies
+            ])
+        else:
+            self.transform = torchvision.transforms.Compose([
+                torchvision.transforms.ToTensor(),
+                transform,
+                torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+
+    def __len__(self):
+        return len(self.img_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.img_paths[idx]
+        label = self.labels[idx]
+        # and get the class map
+        if isinstance(label, str) or isinstance(label, np.str_):
+            print("label is not an integer, trying to convert it to integer",label,type(label))
+            label = self.class_map[label]
+
+        
+        # use the prepare_batch method for a single image
+        img = self.batch_generator.prepare_batch([img_path])
+        img = img.squeeze(3)  # remove the batch dimension
+        if self.transform:
+            img = self.transform(img)
+        
+        return img, torch.tensor(label, dtype=torch.long)
